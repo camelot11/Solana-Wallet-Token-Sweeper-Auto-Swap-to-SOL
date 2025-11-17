@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+import os, json, time, base64, requests
+from dotenv import load_dotenv
+from solana.rpc.api import Client
+from solana.publickey import PublicKey
+from solders.keypair import Keypair
+from solders.transaction import Transaction
+
+load_dotenv()
+
+PRIVATE_KEY = json.loads(os.getenv("PRIVATE_KEY"))
+RPC = "https://api.mainnet-beta.solana.com"
+JUP_QUOTE = "https://quote-api.jup.ag/v6/quote"
+JUP_SWAP = "https://quote-api.jup.ag/v6/swap"
+SLIPPAGE = 50
+MIN_AMOUNT = 0.0001
+
+client = Client(RPC)
+wallet = Keypair.from_bytes(bytes(PRIVATE_KEY))
+
+def get_tokens():
+    return client.get_token_accounts_by_owner(
+        wallet.pubkey(),
+        program_id=PublicKey("TokenkegQfeZyiNwAJbNbGKLPAuT1rZ9vB8r4u8q1t5")
+    ).value
+
+def balance(pubkey):
+    b = client.get_token_account_balance(pubkey).value
+    return int(b.amount) / (10 ** b.decimals), b.decimals
+
+def quote(in_mint, amount):
+    p = {"inputMint": in_mint, "outputMint": "So11111111111111111111111111111111111111112",
+         "amount": amount, "slippageBps": SLIPPAGE}
+    return requests.get(JUP_QUOTE, params=p, timeout=10).json()
+
+def swap_tx(quote_resp):
+    payload = {"quoteResponse": quote_resp, "userPublicKey": str(wallet.pubkey()), "wrapAndUnwrapSol": True}
+    return requests.post(JUP_SWAP, json=payload, timeout=15).json()["swapTransaction"]
+
+def send(tx_b64):
+    tx = Transaction.deserialize(base64.b64decode(tx_b64))
+    tx.sign(wallet)
+    return client.send_raw_transaction(tx.serialize())
+
+for acc in get_tokens():
+    info = acc.account.data.parsed["info"]
+    mint = info["mint"]
+    if mint == "So11111111111111111111111111111111111111112":
+        continue
+    amt, dec = balance(acc.pubkey)
+    if amt < MIN_AMOUNT:
+        continue
+    raw = int(amt * 10**dec)
+    q = quote(mint, raw)
+    tx = swap_tx(q)
+    sig = send(tx)
+    print(f"Swapped {amt:.6f} {mint[:6]}... -> SOL | {sig}")
+    time.sleep(2.5)
